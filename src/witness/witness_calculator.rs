@@ -135,7 +135,7 @@ impl WitnessCalculator {
             let prime = safe_memory.read_big(store, ptr as usize, n32 as usize)?;
 
             let n64 = ((prime.bits() - 1) / 64 + 1) as u32;
-            safe_memory.prime = prime.clone();
+            safe_memory.prime.clone_from(&prime);
 
             Ok(WitnessCalculator {
                 instance,
