@@ -64,7 +64,7 @@ impl WitnessCalculator {
 
     pub fn from_module(store: &mut Store, module: Module) -> Result<Self> {
         // Set up the memory
-        let memory = Memory::new(store, MemoryType::new(2000, None, false)).unwrap();
+        let memory = Memory::new(store, MemoryType::new(256, None, false)).unwrap();
         let mut import_object = imports! {
             "env" => {
                 "memory" => memory.clone(),
