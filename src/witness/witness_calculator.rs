@@ -64,10 +64,10 @@ impl WitnessCalculator {
 
     pub fn from_module(store: &mut Store, module: Module) -> Result<Self> {
         // Set up the memory
-        let memory = Memory::new(store, MemoryType::new(256, None, false)).unwrap();
+        // let memory = Memory::new(store, MemoryType::new(256, None, false)).unwrap();
         let mut import_object = imports! {
             "env" => {
-                "memory" => memory.clone(),
+                // "memory" => memory.clone(),
             },
             // Host function callbacks from the WASM
             "runtime" => {
@@ -85,14 +85,14 @@ impl WitnessCalculator {
         };
 
         let mut wasi_env = WasiEnv::builder("calculateWitness").finalize(store)?;
-        let wasi_env_imports =
-            generate_import_object_from_env(store, &wasi_env.env, WasiVersion::Snapshot1);
-        import_object.extend(&wasi_env_imports);
+        // let wasi_env_imports =
+        //     generate_import_object_from_env(store, &wasi_env.env, WasiVersion::Snapshot1);
+        // import_object.extend(&wasi_env_imports);
 
         let instance = Instance::new(store, &module, &import_object)?;
         let exports = instance.exports.clone();
         let wasm = Wasm::new(exports);
-        wasi_env.initialize_with_memory(store, instance, Some(memory.clone()), false)?;
+        wasi_env.initialize(store, instance)?;
 
         let version = wasm.get_version(store).unwrap_or(1);
         // Circom 2 feature flag with version 2
@@ -122,29 +122,29 @@ impl WitnessCalculator {
             })
         }
 
-        fn new_circom1(
-            instance: Wasm,
-            store: &mut Store,
-            memory: Memory,
-            version: u32,
-        ) -> Result<WitnessCalculator> {
-            // Fallback to Circom 1 behavior
-            let n32 = (instance.get_fr_len(store)? >> 2) - 2;
-            let mut safe_memory = SafeMemory::new(memory, n32 as usize, BigInt::zero());
-            let ptr = instance.get_ptr_raw_prime(store)?;
-            let prime = safe_memory.read_big(store, ptr as usize, n32 as usize)?;
+        // fn new_circom1(
+        //     instance: Wasm,
+        //     store: &mut Store,
+        //     memory: Memory,
+        //     version: u32,
+        // ) -> Result<WitnessCalculator> {
+        //     // Fallback to Circom 1 behavior
+        //     let n32 = (instance.get_fr_len(store)? >> 2) - 2;
+        //     let mut safe_memory = SafeMemory::new(memory, n32 as usize, BigInt::zero());
+        //     let ptr = instance.get_ptr_raw_prime(store)?;
+        //     let prime = safe_memory.read_big(store, ptr as usize, n32 as usize)?;
 
-            let n64 = ((prime.bits() - 1) / 64 + 1) as u32;
-            safe_memory.prime.clone_from(&prime);
+        //     let n64 = ((prime.bits() - 1) / 64 + 1) as u32;
+        //     safe_memory.prime.clone_from(&prime);
 
-            Ok(WitnessCalculator {
-                instance,
-                memory: Some(safe_memory),
-                n64,
-                circom_version: version,
-                prime,
-            })
-        }
+        //     Ok(WitnessCalculator {
+        //         instance,
+        //         memory: Some(safe_memory),
+        //         n64,
+        //         circom_version: version,
+        //         prime,
+        //     })
+        // }
 
         // Three possibilities:
         // a) Circom 2 feature flag enabled, WASM runtime version 2
@@ -157,7 +157,7 @@ impl WitnessCalculator {
             if #[cfg(feature = "circom-2")] {
                 match version {
                     2 => new_circom2(wasm, store, version),
-                    1 => new_circom1(wasm, store, memory, version),
+                    // 1 => new_circom1(wasm, store, memory, version),
                     _ => panic!("Unknown Circom version")
                 }
             } else {
