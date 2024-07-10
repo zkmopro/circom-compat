@@ -9,4 +9,4 @@ pub use circom::{CircomCircuit, CircomReduction};
 pub mod ethereum;
 
 mod zkey;
-pub use zkey::{read_zkey, ZkeyHeaderReader, FieldSerialization};
+pub use zkey::{read_zkey, FieldSerialization, ZkeyHeaderReader};
