@@ -6,9 +6,6 @@ pub use r1cs_reader::{R1CSFile, R1CS};
 mod circuit;
 pub use circuit::CircomCircuit;
 
-mod builder;
-pub use builder::{CircomBuilder, CircomConfig};
-
 mod qap;
 pub use qap::CircomReduction;
 
