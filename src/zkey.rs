@@ -25,7 +25,9 @@
 //!  PointsC(8)
 //!  PointsH(9)
 //!  Contributions(10)
-use ark_ff::{BigInteger256, PrimeField};
+use ark_bls12_381::Bls12_381;
+use ark_ec::pairing::Pairing;
+use ark_ff::{BigInteger256, BigInteger384, Field, PrimeField};
 use ark_relations::r1cs::ConstraintMatrices;
 use ark_serialize::{CanonicalDeserialize, SerializationError};
 use ark_std::log2;
@@ -33,14 +35,148 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use std::{
     collections::HashMap,
+    convert::{TryFrom, TryInto},
     io::{Read, Seek, SeekFrom},
+    marker::PhantomData,
 };
 
-use ark_bn254::{Bn254, Fq, Fq2, Fr, G1Affine, G2Affine};
+use ark_bn254::Bn254;
 use ark_groth16::{ProvingKey, VerifyingKey};
+use num_bigint::BigUint;
 use num_traits::Zero;
+use std::fs::File;
 
 type IoResult<T> = Result<T, SerializationError>;
+
+pub trait FieldSerialization: Pairing {
+    type Fr: Field;
+    type Fq;
+    type Fq2;
+
+    fn deserialize_field_fr<R: Read>(reader: &mut R) -> IoResult<Self::Fr>;
+    fn deserialize_field<R: Read>(reader: &mut R) -> IoResult<Self::Fq>;
+    fn deserialize_field2<R: Read>(reader: &mut R) -> IoResult<Self::Fq2>;
+    fn deserialize_g1<R: Read>(reader: &mut R) -> IoResult<Self::G1Affine>;
+    fn deserialize_g2<R: Read>(reader: &mut R) -> IoResult<Self::G2Affine>;
+    fn deserialize_g1_vec<R: Read>(reader: &mut R, n_vars: u32) -> IoResult<Vec<Self::G1Affine>>;
+    fn deserialize_g2_vec<R: Read>(reader: &mut R, n_vars: u32) -> IoResult<Vec<Self::G2Affine>>;
+}
+
+impl FieldSerialization for Bn254 {
+    type Fr = ark_bn254::Fr;
+    type Fq = ark_bn254::Fq;
+    type Fq2 = ark_bn254::Fq2;
+
+    // need to divide by R, since snarkjs outputs the zkey with coefficients
+    // multiplieid by R^2
+    fn deserialize_field_fr<R: Read>(reader: &mut R) -> IoResult<Self::Fr> {
+        let bigint = BigInteger256::deserialize_uncompressed(reader)?;
+        Ok(Self::Fr::new_unchecked(
+            Self::Fr::new_unchecked(bigint).into_bigint(),
+        ))
+    }
+
+    // skips the multiplication by R because Circom points are already in Montgomery form
+    fn deserialize_field<R: Read>(reader: &mut R) -> IoResult<Self::Fq> {
+        let bigint = BigInteger256::deserialize_uncompressed_unchecked(reader)?;
+        // if you use Fq::new it multiplies by R
+        Ok(Self::Fq::new_unchecked(bigint))
+    }
+
+    fn deserialize_field2<R: Read>(reader: &mut R) -> IoResult<Self::Fq2> {
+        let c0 = Self::deserialize_field(reader)?;
+        let c1 = Self::deserialize_field(reader)?;
+        Ok(Self::Fq2::new(c0, c1))
+    }
+
+    fn deserialize_g1<R: Read>(reader: &mut R) -> IoResult<Self::G1Affine> {
+        let x = Self::deserialize_field(reader)?;
+        let y = Self::deserialize_field(reader)?;
+        let infinity = x.is_zero() && y.is_zero();
+        if infinity {
+            Ok(Self::G1Affine::identity())
+        } else {
+            Ok(Self::G1Affine::new_unchecked(x, y))
+        }
+    }
+
+    fn deserialize_g2<R: Read>(reader: &mut R) -> IoResult<Self::G2Affine> {
+        let f1 = Self::deserialize_field2(reader)?;
+        let f2 = Self::deserialize_field2(reader)?;
+        let infinity = f1.is_zero() && f2.is_zero();
+        if infinity {
+            Ok(Self::G2Affine::identity())
+        } else {
+            Ok(Self::G2Affine::new_unchecked(f1, f2))
+        }
+    }
+
+    fn deserialize_g1_vec<R: Read>(reader: &mut R, n_vars: u32) -> IoResult<Vec<Self::G1Affine>> {
+        (0..n_vars).map(|_| Self::deserialize_g1(reader)).collect()
+    }
+
+    fn deserialize_g2_vec<R: Read>(reader: &mut R, n_vars: u32) -> IoResult<Vec<Self::G2Affine>> {
+        (0..n_vars).map(|_| Self::deserialize_g2(reader)).collect()
+    }
+}
+
+impl FieldSerialization for Bls12_381 {
+    type Fr = ark_bls12_381::Fr;
+    type Fq = ark_bls12_381::Fq;
+    type Fq2 = ark_bls12_381::Fq2;
+
+    // need to divide by R, since snarkjs outputs the zkey with coefficients
+    // multiplieid by R^2
+    fn deserialize_field_fr<R: Read>(reader: &mut R) -> IoResult<Self::Fr> {
+        let bigint = BigInteger256::deserialize_uncompressed(reader)?;
+        Ok(Self::Fr::new_unchecked(
+            Self::Fr::new_unchecked(bigint).into_bigint(),
+        ))
+    }
+
+    // skips the multiplication by R because Circom points are already in Montgomery form
+    fn deserialize_field<R: Read>(reader: &mut R) -> IoResult<Self::Fq> {
+        let bigint = BigInteger384::deserialize_uncompressed(reader)?;
+        // if you use Fq::new it multiplies by R
+        Ok(Self::Fq::new_unchecked(bigint))
+    }
+
+    fn deserialize_field2<R: Read>(reader: &mut R) -> IoResult<Self::Fq2> {
+        let c0 = Self::deserialize_field(reader)?;
+        let c1 = Self::deserialize_field(reader)?;
+        Ok(Self::Fq2::new(c0, c1))
+    }
+
+    fn deserialize_g1<R: Read>(reader: &mut R) -> IoResult<Self::G1Affine> {
+        let x = Self::deserialize_field(reader)?;
+        let y = Self::deserialize_field(reader)?;
+        let infinity = x.is_zero() && y.is_zero();
+        if infinity {
+            Ok(Self::G1Affine::identity())
+        } else {
+            Ok(Self::G1Affine::new(x, y))
+        }
+    }
+
+    fn deserialize_g2<R: Read>(reader: &mut R) -> IoResult<Self::G2Affine> {
+        let f1 = Self::deserialize_field2(reader)?;
+        let f2 = Self::deserialize_field2(reader)?;
+        let infinity = f1.is_zero() && f2.is_zero();
+        if infinity {
+            Ok(Self::G2Affine::identity())
+        } else {
+            Ok(Self::G2Affine::new(f1, f2))
+        }
+    }
+
+    fn deserialize_g1_vec<R: Read>(reader: &mut R, n_vars: u32) -> IoResult<Vec<Self::G1Affine>> {
+        (0..n_vars).map(|_| Self::deserialize_g1(reader)).collect()
+    }
+
+    fn deserialize_g2_vec<R: Read>(reader: &mut R, n_vars: u32) -> IoResult<Vec<Self::G2Affine>> {
+        (0..n_vars).map(|_| Self::deserialize_g2(reader)).collect()
+    }
+}
 
 #[derive(Clone, Debug)]
 struct Section {
@@ -50,26 +186,27 @@ struct Section {
 }
 
 /// Reads a SnarkJS ZKey file into an Arkworks ProvingKey.
-pub fn read_zkey<R: Read + Seek>(
+pub fn read_zkey<R: Read + Seek, P: Pairing + FieldSerialization>(
     reader: &mut R,
-) -> IoResult<(ProvingKey<Bn254>, ConstraintMatrices<Fr>)> {
-    let mut binfile = BinFile::new(reader)?;
-    let proving_key = binfile.proving_key()?;
+) -> IoResult<(ProvingKey<P>, ConstraintMatrices<P::Fr>)> {
+    let mut binfile = BinFile::<R, P>::new(reader)?;
+    let proving_key: ProvingKey<P> = binfile.proving_key()?;
     let matrices = binfile.matrices()?;
     Ok((proving_key, matrices))
 }
 
 #[derive(Debug)]
-struct BinFile<'a, R> {
+struct BinFile<'a, R, P: Pairing + FieldSerialization> {
     #[allow(dead_code)]
     ftype: String,
     #[allow(dead_code)]
     version: u32,
     sections: HashMap<u32, Vec<Section>>,
     reader: &'a mut R,
+    _p: PhantomData<P>,
 }
 
-impl<'a, R: Read + Seek> BinFile<'a, R> {
+impl<'a, R: Read + Seek, P: Pairing + FieldSerialization> BinFile<'a, R, P> {
     fn new(reader: &'a mut R) -> IoResult<Self> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
@@ -97,10 +234,11 @@ impl<'a, R: Read + Seek> BinFile<'a, R> {
             version,
             sections,
             reader,
+            _p: PhantomData,
         })
     }
 
-    fn proving_key(&mut self) -> IoResult<ProvingKey<Bn254>> {
+    fn proving_key(&mut self) -> IoResult<ProvingKey<P>> {
         let header = self.groth_header()?;
         let ic = self.ic(header.n_public)?;
 
@@ -110,7 +248,7 @@ impl<'a, R: Read + Seek> BinFile<'a, R> {
         let l_query = self.l_query(header.n_vars - header.n_public - 1)?;
         let h_query = self.h_query(header.domain_size as usize)?;
 
-        let vk = VerifyingKey::<Bn254> {
+        let vk = VerifyingKey::<P> {
             alpha_g1: header.verifying_key.alpha_g1,
             beta_g2: header.verifying_key.beta_g2,
             gamma_g2: header.verifying_key.gamma_g2,
@@ -118,7 +256,7 @@ impl<'a, R: Read + Seek> BinFile<'a, R> {
             gamma_abc_g1: ic,
         };
 
-        let pk = ProvingKey::<Bn254> {
+        let pk = ProvingKey::<P> {
             vk,
             beta_g1: header.verifying_key.beta_g1,
             delta_g1: header.verifying_key.delta_g1,
@@ -136,19 +274,19 @@ impl<'a, R: Read + Seek> BinFile<'a, R> {
         self.sections.get(&id).unwrap()[0].clone()
     }
 
-    fn groth_header(&mut self) -> IoResult<HeaderGroth> {
+    fn groth_header(&mut self) -> IoResult<HeaderGroth<P>> {
         let section = self.get_section(2);
         let header = HeaderGroth::new(&mut self.reader, &section)?;
         Ok(header)
     }
 
-    fn ic(&mut self, n_public: usize) -> IoResult<Vec<G1Affine>> {
+    fn ic(&mut self, n_public: usize) -> IoResult<Vec<P::G1Affine>> {
         // the range is non-inclusive so we do +1 to get all inputs
         self.g1_section(n_public + 1, 3)
     }
 
     /// Returns the [`ConstraintMatrices`] corresponding to the zkey
-    pub fn matrices(&mut self) -> IoResult<ConstraintMatrices<Fr>> {
+    pub fn matrices(&mut self) -> IoResult<ConstraintMatrices<P::Fr>> {
         let header = self.groth_header()?;
 
         let section = self.get_section(4);
@@ -163,7 +301,7 @@ impl<'a, R: Read + Seek> BinFile<'a, R> {
             let constraint: u32 = self.reader.read_u32::<LittleEndian>()?;
             let signal: u32 = self.reader.read_u32::<LittleEndian>()?;
 
-            let value: Fr = deserialize_field_fr(&mut self.reader)?;
+            let value: P::Fr = P::deserialize_field_fr(&mut self.reader)?;
             max_constraint_index = std::cmp::max(max_constraint_index, constraint);
             matrices[matrix as usize][constraint as usize].push((value, signal as usize));
         }
@@ -195,57 +333,57 @@ impl<'a, R: Read + Seek> BinFile<'a, R> {
         Ok(matrices)
     }
 
-    fn a_query(&mut self, n_vars: usize) -> IoResult<Vec<G1Affine>> {
+    fn a_query(&mut self, n_vars: usize) -> IoResult<Vec<P::G1Affine>> {
         self.g1_section(n_vars, 5)
     }
 
-    fn b_g1_query(&mut self, n_vars: usize) -> IoResult<Vec<G1Affine>> {
+    fn b_g1_query(&mut self, n_vars: usize) -> IoResult<Vec<P::G1Affine>> {
         self.g1_section(n_vars, 6)
     }
 
-    fn b_g2_query(&mut self, n_vars: usize) -> IoResult<Vec<G2Affine>> {
+    fn b_g2_query(&mut self, n_vars: usize) -> IoResult<Vec<P::G2Affine>> {
         self.g2_section(n_vars, 7)
     }
 
-    fn l_query(&mut self, n_vars: usize) -> IoResult<Vec<G1Affine>> {
+    fn l_query(&mut self, n_vars: usize) -> IoResult<Vec<P::G1Affine>> {
         self.g1_section(n_vars, 8)
     }
 
-    fn h_query(&mut self, n_vars: usize) -> IoResult<Vec<G1Affine>> {
+    fn h_query(&mut self, n_vars: usize) -> IoResult<Vec<P::G1Affine>> {
         self.g1_section(n_vars, 9)
     }
 
-    fn g1_section(&mut self, num: usize, section_id: usize) -> IoResult<Vec<G1Affine>> {
+    fn g1_section(&mut self, num: usize, section_id: usize) -> IoResult<Vec<P::G1Affine>> {
         let section = self.get_section(section_id as u32);
         self.reader.seek(SeekFrom::Start(section.position))?;
-        deserialize_g1_vec(self.reader, num as u32)
+        P::deserialize_g1_vec(self.reader, num as u32)
     }
 
-    fn g2_section(&mut self, num: usize, section_id: usize) -> IoResult<Vec<G2Affine>> {
+    fn g2_section(&mut self, num: usize, section_id: usize) -> IoResult<Vec<P::G2Affine>> {
         let section = self.get_section(section_id as u32);
         self.reader.seek(SeekFrom::Start(section.position))?;
-        deserialize_g2_vec(self.reader, num as u32)
+        P::deserialize_g2_vec(self.reader, num as u32)
     }
 }
 
 #[derive(Default, Clone, Debug, CanonicalDeserialize)]
-pub struct ZVerifyingKey {
-    alpha_g1: G1Affine,
-    beta_g1: G1Affine,
-    beta_g2: G2Affine,
-    gamma_g2: G2Affine,
-    delta_g1: G1Affine,
-    delta_g2: G2Affine,
+pub struct ZVerifyingKey<F: FieldSerialization> {
+    alpha_g1: F::G1Affine,
+    beta_g1: F::G1Affine,
+    beta_g2: F::G2Affine,
+    gamma_g2: F::G2Affine,
+    delta_g1: F::G1Affine,
+    delta_g2: F::G2Affine,
 }
 
-impl ZVerifyingKey {
+impl<F: FieldSerialization> ZVerifyingKey<F> {
     fn new<R: Read>(reader: &mut R) -> IoResult<Self> {
-        let alpha_g1 = deserialize_g1(reader)?;
-        let beta_g1 = deserialize_g1(reader)?;
-        let beta_g2 = deserialize_g2(reader)?;
-        let gamma_g2 = deserialize_g2(reader)?;
-        let delta_g1 = deserialize_g1(reader)?;
-        let delta_g2 = deserialize_g2(reader)?;
+        let alpha_g1 = F::deserialize_g1(reader)?;
+        let beta_g1 = F::deserialize_g1(reader)?;
+        let beta_g2 = F::deserialize_g2(reader)?;
+        let gamma_g2 = F::deserialize_g2(reader)?;
+        let delta_g1 = F::deserialize_g1(reader)?;
+        let delta_g2 = F::deserialize_g2(reader)?;
 
         Ok(Self {
             alpha_g1,
@@ -259,15 +397,15 @@ impl ZVerifyingKey {
 }
 
 #[derive(Clone, Debug)]
-struct HeaderGroth {
+struct HeaderGroth<F: FieldSerialization> {
     #[allow(dead_code)]
     n8q: u32,
     #[allow(dead_code)]
-    q: BigInteger256,
+    pub q: F::Fq,
     #[allow(dead_code)]
     n8r: u32,
     #[allow(dead_code)]
-    r: BigInteger256,
+    pub r: F::Fr,
 
     n_vars: usize,
     n_public: usize,
@@ -276,10 +414,10 @@ struct HeaderGroth {
     #[allow(dead_code)]
     power: u32,
 
-    verifying_key: ZVerifyingKey,
+    verifying_key: ZVerifyingKey<F>,
 }
 
-impl HeaderGroth {
+impl<P: Pairing + FieldSerialization> HeaderGroth<P> {
     fn new<R: Read + Seek>(reader: &mut R, section: &Section) -> IoResult<Self> {
         reader.seek(SeekFrom::Start(section.position))?;
         Self::read(reader)
@@ -289,11 +427,11 @@ impl HeaderGroth {
         // TODO: Impl From<u32> in Arkworks
         let n8q: u32 = u32::deserialize_uncompressed(&mut reader)?;
         // group order r of Bn254
-        let q = BigInteger256::deserialize_uncompressed(&mut reader)?;
+        let q = P::deserialize_field(&mut reader)?;
 
         let n8r: u32 = u32::deserialize_uncompressed(&mut reader)?;
         // Prime field modulus
-        let r = BigInteger256::deserialize_uncompressed(&mut reader)?;
+        let r = P::deserialize_field_fr(&mut reader)?;
 
         let n_vars = u32::deserialize_uncompressed(&mut reader)? as usize;
         let n_public = u32::deserialize_uncompressed(&mut reader)? as usize;
@@ -301,7 +439,7 @@ impl HeaderGroth {
         let domain_size: u32 = u32::deserialize_uncompressed(&mut reader)?;
         let power = log2(domain_size as usize);
 
-        let verifying_key = ZVerifyingKey::new(&mut reader)?;
+        let verifying_key = ZVerifyingKey::<P>::new(&mut reader)?;
 
         Ok(Self {
             n8q,
@@ -317,60 +455,146 @@ impl HeaderGroth {
     }
 }
 
-// need to divide by R, since snarkjs outputs the zkey with coefficients
-// multiplieid by R^2
-fn deserialize_field_fr<R: Read>(reader: &mut R) -> IoResult<Fr> {
-    let bigint = BigInteger256::deserialize_uncompressed(reader)?;
-    Ok(Fr::new_unchecked(Fr::new_unchecked(bigint).into_bigint()))
+pub struct ZkeyHeaderReader {
+    zkey_path: std::path::PathBuf,
+    offset: usize,
+    data: Option<Vec<u8>>,
+    pub n8q: u32,
+    pub n8r: u32,
+    n_public: u32,
+    n_vars: u32,
+    domain_size: u32,
+    pub q: BigUint,
+    pub r: BigUint,
 }
 
-// skips the multiplication by R because Circom points are already in Montgomery form
-fn deserialize_field<R: Read>(reader: &mut R) -> IoResult<Fq> {
-    let bigint = BigInteger256::deserialize_uncompressed(reader)?;
-    // if you use Fq::new it multiplies by R
-    Ok(Fq::new_unchecked(bigint))
-}
-
-pub fn deserialize_field2<R: Read>(reader: &mut R) -> IoResult<Fq2> {
-    let c0 = deserialize_field(reader)?;
-    let c1 = deserialize_field(reader)?;
-    Ok(Fq2::new(c0, c1))
-}
-
-fn deserialize_g1<R: Read>(reader: &mut R) -> IoResult<G1Affine> {
-    let x = deserialize_field(reader)?;
-    let y = deserialize_field(reader)?;
-    let infinity = x.is_zero() && y.is_zero();
-    if infinity {
-        Ok(G1Affine::identity())
-    } else {
-        Ok(G1Affine::new_unchecked(x, y))
+// This implementation loads only the first few bytes
+// of the zkey file to get the groth16 header.
+//
+// This header tells us what curve the zkey was built for.
+// This is difficult to do in zkey.rs because we define the
+// size if integers based on the type at the rust level, while
+// zkeys specify their integer sizes in the file.
+//
+// e.g. we need to use the integer size specified in the zkey to
+// determine what type to use in rust
+impl ZkeyHeaderReader {
+    pub fn new(zkey_path: &str) -> Self {
+        ZkeyHeaderReader {
+            zkey_path: std::path::PathBuf::from(zkey_path),
+            offset: 0,
+            data: None,
+            n8q: 0,
+            n8r: 0,
+            n_public: 0,
+            n_vars: 0,
+            domain_size: 0,
+            q: BigUint::zero(),
+            r: BigUint::zero(),
+        }
     }
-}
 
-fn deserialize_g2<R: Read>(reader: &mut R) -> IoResult<G2Affine> {
-    let f1 = deserialize_field2(reader)?;
-    let f2 = deserialize_field2(reader)?;
-    let infinity = f1.is_zero() && f2.is_zero();
-    if infinity {
-        Ok(G2Affine::identity())
-    } else {
-        Ok(G2Affine::new_unchecked(f1, f2))
+    pub fn read(&mut self) {
+        let mut file = File::open(self.zkey_path.clone()).unwrap();
+        let mut zkey_bytes = vec![0; 512];
+        // file.read_to_end(&mut zkey_bytes).unwrap();
+        file.read_exact(&mut zkey_bytes).unwrap();
+        self.data = Some(zkey_bytes);
+        self.parse();
     }
-}
 
-fn deserialize_g1_vec<R: Read>(reader: &mut R, n_vars: u32) -> IoResult<Vec<G1Affine>> {
-    (0..n_vars).map(|_| deserialize_g1(reader)).collect()
-}
+    fn parse(&mut self) {
+        let _magic = self.read_u32();
+        let _version = self.read_u32();
+        let num_sections = self.read_u32();
+        for i in 0..num_sections {
+            if i > 1 {
+                return;
+            }
+            let section_id = self.read_u32();
+            let section_len = self.read_u64();
+            self.read_section(section_id, section_len);
+        }
+    }
 
-fn deserialize_g2_vec<R: Read>(reader: &mut R, n_vars: u32) -> IoResult<Vec<G2Affine>> {
-    (0..n_vars).map(|_| deserialize_g2(reader)).collect()
+    fn read_section(&mut self, section_n: u32, section_len: u64) {
+        match section_n {
+            1 => self.read_header(section_len),
+            2 => self.read_groth16_header(section_len),
+            // 3 => self.read_ic(section_len),
+            // 4 => self.read_ccoefs(section_len),
+            // 5 => self.read_a(section_len),
+            // 6 => self.read_b1(section_len),
+            // 7 => self.read_b2(section_len),
+            // 8 => self.read_c(section_len),
+            // 9 => self.read_h(section_len),
+            // 10 => (|| {})(), // ignore reading the contributions
+            _ => panic!("unknown section index"),
+        }
+    }
+
+    fn read_u32(&mut self) -> u32 {
+        let v = u32::from_le_bytes(
+            self.data.as_ref().unwrap()[self.offset..(self.offset + 4)]
+                .try_into()
+                .unwrap(),
+        );
+        self.offset += 4;
+        v
+    }
+
+    fn read_u64(&mut self) -> u64 {
+        let v = u64::from_le_bytes(
+            self.data.as_ref().unwrap()[self.offset..(self.offset + 8)]
+                .try_into()
+                .unwrap(),
+        );
+        self.offset += 8;
+        v
+    }
+
+    fn read_bigint(&mut self, n8: u32) -> BigUint {
+        let usize_n8 = usize::try_from(n8).unwrap();
+        // convert an array of LE bytes to an array of LE 64 bit words
+        let bytes = &self.data.as_ref().unwrap()[self.offset..(self.offset + usize_n8)];
+        // let mut words_64 = [0_u64; 4];
+        // for x in 0..4 {
+        //     for y in 0..8 {
+        //         words_64[x] += u64::from(bytes[x * 8 + y]) << (8 * y);
+        //     }
+        // }
+        self.offset += usize_n8;
+        BigUint::from_bytes_le(bytes)
+        // BigInteger256::new(words_64)
+    }
+
+    // we start at the offset after the section length
+    fn read_header(&mut self, _section_len: u64) {
+        let key_type = self.read_u32();
+        if key_type != 1 {
+            panic!("non-groth16 zkey detected");
+        }
+    }
+
+    fn read_groth16_header(&mut self, _section_len: u64) {
+        self.n8q = self.read_u32();
+        // read the q
+        self.q = self.read_bigint(self.n8q);
+
+        self.n8r = self.read_u32();
+        // read the r
+        self.r = self.read_bigint(self.n8r);
+
+        self.n_vars = self.read_u32();
+        self.n_public = self.read_u32();
+        self.domain_size = self.read_u32();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_bn254::{G1Projective, G2Projective};
+    use ark_bn254;
     use ark_crypto_primitives::snark::SNARK;
     use num_bigint::BigUint;
     use serde_json::Value;
@@ -387,7 +611,7 @@ mod tests {
 
     use std::convert::TryFrom;
 
-    fn fq_from_str(s: &str) -> Fq {
+    fn fq_from_str(s: &str) -> ark_bn254::Fq {
         BigInteger256::try_from(BigUint::from_str(s).unwrap())
             .unwrap()
             .into()
@@ -432,16 +656,16 @@ mod tests {
     }
 
     // Circom logs in Projective coordinates: console.log(curve.G1.one)
-    fn g1_one() -> G1Affine {
-        let x = Fq::one();
-        let y = Fq::one() + Fq::one();
-        let z = Fq::one();
-        G1Affine::from(G1Projective::new(x, y, z))
+    fn g1_one() -> ark_bn254::G1Affine {
+        let x = ark_bn254::Fq::one();
+        let y = ark_bn254::Fq::one() + ark_bn254::Fq::one();
+        let z = ark_bn254::Fq::one();
+        ark_bn254::G1Affine::from(ark_bn254::G1Projective::new(x, y, z))
     }
 
     // Circom logs in Projective coordinates: console.log(curve.G2.one)
-    fn g2_one() -> G2Affine {
-        let x = Fq2::new(
+    fn g2_one() -> ark_bn254::G2Affine {
+        let x = ark_bn254::Fq2::new(
             fq_from_str(
                 "10857046999023057135944570762232829481370756359578518086990519993285655852781",
             ),
@@ -450,7 +674,7 @@ mod tests {
             ),
         );
 
-        let y = Fq2::new(
+        let y = ark_bn254::Fq2::new(
             fq_from_str(
                 "8495653923123431417604973247489272438418190587263600148770280649306958101930",
             ),
@@ -458,22 +682,22 @@ mod tests {
                 "4082367875863433681332203403145435568316851327593401208105741076214120093531",
             ),
         );
-        let z = Fq2::new(Fq::one(), Fq::zero());
-        G2Affine::from(G2Projective::new(x, y, z))
+        let z = ark_bn254::Fq2::new(ark_bn254::Fq::one(), ark_bn254::Fq::zero());
+        ark_bn254::G2Affine::from(ark_bn254::G2Projective::new(x, y, z))
     }
 
     #[test]
     fn can_deser_fq() {
         let buf = fq_buf();
-        let fq = deserialize_field(&mut &buf[..]).unwrap();
-        assert_eq!(fq, Fq::one());
+        let fq = Bn254::deserialize_field(&mut &buf[..]).unwrap();
+        assert_eq!(fq, ark_bn254::Fq::one());
     }
 
     #[test]
     fn can_deser_g1() {
         let buf = g1_buf();
         assert_eq!(buf.len(), 64);
-        let g1 = deserialize_g1(&mut &buf[..]).unwrap();
+        let g1 = Bn254::deserialize_g1(&mut &buf[..]).unwrap();
         let expected = g1_one();
         assert_eq!(g1, expected);
     }
@@ -488,7 +712,7 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = vec![g1_one(); n_vars];
 
-        let de = deserialize_g1_vec(&mut &buf[..], n_vars as u32).unwrap();
+        let de = Bn254::deserialize_g1_vec(&mut &buf[..], n_vars as u32).unwrap();
         assert_eq!(expected, de);
     }
 
@@ -496,7 +720,7 @@ mod tests {
     fn can_deser_g2() {
         let buf = g2_buf();
         assert_eq!(buf.len(), 128);
-        let g2 = deserialize_g2(&mut &buf[..]).unwrap();
+        let g2 = Bn254::deserialize_g2(&mut &buf[..]).unwrap();
 
         let expected = g2_one();
         assert_eq!(g2, expected);
@@ -512,7 +736,7 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = vec![g2_one(); n_vars];
 
-        let de = deserialize_g2_vec(&mut &buf[..], n_vars as u32).unwrap();
+        let de = Bn254::deserialize_g2_vec(&mut &buf[..], n_vars as u32).unwrap();
         assert_eq!(expected, de);
     }
 
@@ -534,7 +758,33 @@ mod tests {
         // `snarkjs zkey new circuit.r1cs powersOfTau28_hez_final_10.ptau test.zkey`
         let path = "./test-vectors/test.zkey";
         let mut file = File::open(path).unwrap();
-        let mut binfile = BinFile::new(&mut file).unwrap();
+        let mut binfile = BinFile::<_, Bn254>::new(&mut file).unwrap();
+        let header = binfile.groth_header().unwrap();
+        assert_eq!(header.n_vars, 4);
+        assert_eq!(header.n_public, 1);
+        assert_eq!(header.domain_size, 4);
+        assert_eq!(header.power, 2);
+    }
+
+    #[test]
+    fn bls_header() {
+        // `circom --r1cs` using the below file:
+        //
+        //  template Multiplier() {
+        //     signal private input a;
+        //     signal private input b;
+        //     signal output c;
+        //
+        //     c <== a*b;
+        // }
+        //
+        // component main = Multiplier();
+        //
+        // Then:
+        // `snarkjs zkey new circuit.r1cs powersOfTau28_hez_final_10.ptau test.zkey`
+        let path = "./test-vectors/multiplier2_bls.zkey";
+        let mut file = File::open(path).unwrap();
+        let mut binfile = BinFile::<_, Bls12_381>::new(&mut file).unwrap();
         let header = binfile.groth_header().unwrap();
         assert_eq!(header.n_vars, 4);
         assert_eq!(header.n_public, 1);
@@ -546,11 +796,11 @@ mod tests {
     fn deser_key() {
         let path = "./test-vectors/test.zkey";
         let mut file = File::open(path).unwrap();
-        let (params, _matrices) = read_zkey(&mut file).unwrap();
+        let (params, _matrices) = read_zkey::<_, Bn254>(&mut file).unwrap();
 
         // Check IC
         let expected = vec![
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     11, 205, 205, 176, 2, 105, 129, 243, 153, 58, 137, 89, 61, 95, 99, 161, 133,
                     201, 153, 192, 119, 19, 113, 136, 43, 105, 47, 206, 166, 55, 81, 22, 154, 77,
@@ -559,7 +809,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     118, 135, 198, 156, 63, 190, 210, 98, 194, 59, 169, 168, 204, 168, 76, 208,
                     109, 170, 24, 193, 57, 31, 184, 88, 234, 218, 118, 58, 107, 129, 90, 36, 230,
@@ -573,7 +823,7 @@ mod tests {
 
         // Check A Query
         let expected = vec![
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     240, 165, 110, 187, 72, 39, 218, 59, 128, 85, 50, 174, 229, 1, 86, 58, 125,
                     244, 145, 205, 248, 253, 120, 2, 165, 140, 154, 55, 220, 253, 14, 19, 212, 106,
@@ -582,7 +832,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     93, 53, 177, 82, 50, 5, 123, 116, 91, 35, 14, 196, 43, 180, 54, 15, 88, 144,
                     197, 105, 57, 167, 54, 5, 188, 109, 17, 89, 9, 223, 80, 1, 39, 193, 211, 168,
@@ -591,7 +841,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     177, 47, 21, 237, 244, 73, 76, 98, 80, 10, 10, 142, 80, 145, 40, 254, 100, 214,
                     103, 33, 38, 84, 238, 248, 252, 181, 75, 32, 109, 16, 93, 23, 135, 157, 206,
@@ -600,7 +850,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -613,7 +863,7 @@ mod tests {
 
         // B G1 Query
         let expected = vec![
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -621,7 +871,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -629,7 +879,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -637,7 +887,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     177, 47, 21, 237, 244, 73, 76, 98, 80, 10, 10, 142, 80, 145, 40, 254, 100, 214,
                     103, 33, 38, 84, 238, 248, 252, 181, 75, 32, 109, 16, 93, 23, 192, 95, 174, 93,
@@ -651,7 +901,7 @@ mod tests {
 
         // B G2 Query
         let expected = vec![
-            deserialize_g2(
+            Bn254::deserialize_g2(
                 &mut &[
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -661,7 +911,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g2(
+            Bn254::deserialize_g2(
                 &mut &[
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -671,7 +921,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g2(
+            Bn254::deserialize_g2(
                 &mut &[
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -681,7 +931,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g2(
+            Bn254::deserialize_g2(
                 &mut &[
                     240, 25, 157, 232, 164, 49, 152, 204, 244, 190, 178, 178, 29, 133, 205, 175,
                     172, 28, 12, 123, 139, 202, 196, 13, 67, 165, 204, 42, 74, 40, 6, 36, 112, 104,
@@ -699,7 +949,7 @@ mod tests {
 
         // Check L Query
         let expected = vec![
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     146, 142, 29, 235, 9, 162, 84, 255, 6, 119, 86, 214, 154, 18, 12, 190, 202, 19,
                     168, 45, 29, 76, 174, 130, 6, 59, 146, 15, 229, 82, 81, 40, 50, 25, 124, 247,
@@ -708,7 +958,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     26, 32, 112, 226, 161, 84, 188, 236, 141, 226, 119, 169, 235, 218, 253, 176,
                     157, 184, 108, 243, 73, 122, 239, 217, 39, 190, 239, 105, 147, 190, 80, 47,
@@ -722,7 +972,7 @@ mod tests {
 
         // Check H Query
         let expected = vec![
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     21, 76, 104, 34, 28, 236, 135, 204, 218, 16, 160, 115, 185, 44, 19, 62, 43, 24,
                     57, 99, 207, 105, 10, 139, 195, 60, 17, 57, 85, 244, 167, 10, 166, 166, 165,
@@ -731,7 +981,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     144, 175, 205, 119, 119, 192, 11, 10, 148, 224, 87, 161, 157, 231, 101, 208,
                     55, 15, 13, 16, 24, 59, 9, 22, 63, 215, 255, 30, 77, 188, 71, 37, 84, 227, 59,
@@ -740,7 +990,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     129, 169, 52, 179, 66, 88, 123, 199, 222, 69, 24, 17, 219, 235, 118, 195, 156,
                     210, 14, 21, 76, 155, 178, 210, 223, 4, 233, 5, 8, 18, 156, 24, 82, 68, 183,
@@ -749,7 +999,7 @@ mod tests {
                 ][..],
             )
             .unwrap(),
-            deserialize_g1(
+            Bn254::deserialize_g1(
                 &mut &[
                     207, 61, 229, 214, 21, 61, 103, 165, 93, 145, 54, 138, 143, 214, 5, 83, 183,
                     22, 174, 87, 108, 59, 99, 96, 19, 20, 25, 139, 114, 238, 198, 40, 182, 88, 1,
@@ -766,7 +1016,7 @@ mod tests {
     fn deser_vk() {
         let path = "./test-vectors/test.zkey";
         let mut file = File::open(path).unwrap();
-        let (params, _matrices) = read_zkey(&mut file).unwrap();
+        let (params, _matrices) = read_zkey::<_, Bn254>(&mut file).unwrap();
 
         let json = std::fs::read_to_string("./test-vectors/verification_key.json").unwrap();
         let json: Value = serde_json::from_str(&json).unwrap();
@@ -778,7 +1028,7 @@ mod tests {
         assert_eq!(json_to_g1_vec(&json, "IC"), params.vk.gamma_abc_g1);
     }
 
-    fn json_to_g1(json: &Value, key: &str) -> G1Affine {
+    fn json_to_g1(json: &Value, key: &str) -> ark_bn254::G1Affine {
         let els: Vec<String> = json
             .get(key)
             .unwrap()
@@ -787,14 +1037,14 @@ mod tests {
             .iter()
             .map(|i| i.as_str().unwrap().to_string())
             .collect();
-        G1Affine::from(G1Projective::new(
+        ark_bn254::G1Affine::from(ark_bn254::G1Projective::new(
             fq_from_str(&els[0]),
             fq_from_str(&els[1]),
             fq_from_str(&els[2]),
         ))
     }
 
-    fn json_to_g1_vec(json: &Value, key: &str) -> Vec<G1Affine> {
+    fn json_to_g1_vec(json: &Value, key: &str) -> Vec<ark_bn254::G1Affine> {
         let els: Vec<Vec<String>> = json
             .get(key)
             .unwrap()
@@ -812,7 +1062,7 @@ mod tests {
 
         els.iter()
             .map(|coords| {
-                G1Affine::from(G1Projective::new(
+                ark_bn254::G1Affine::from(ark_bn254::G1Projective::new(
                     fq_from_str(&coords[0]),
                     fq_from_str(&coords[1]),
                     fq_from_str(&coords[2]),
@@ -821,7 +1071,7 @@ mod tests {
             .collect()
     }
 
-    fn json_to_g2(json: &Value, key: &str) -> G2Affine {
+    fn json_to_g2(json: &Value, key: &str) -> ark_bn254::G2Affine {
         let els: Vec<Vec<String>> = json
             .get(key)
             .unwrap()
@@ -837,10 +1087,10 @@ mod tests {
             })
             .collect();
 
-        let x = Fq2::new(fq_from_str(&els[0][0]), fq_from_str(&els[0][1]));
-        let y = Fq2::new(fq_from_str(&els[1][0]), fq_from_str(&els[1][1]));
-        let z = Fq2::new(fq_from_str(&els[2][0]), fq_from_str(&els[2][1]));
-        G2Affine::from(G2Projective::new(x, y, z))
+        let x = ark_bn254::Fq2::new(fq_from_str(&els[0][0]), fq_from_str(&els[0][1]));
+        let y = ark_bn254::Fq2::new(fq_from_str(&els[1][0]), fq_from_str(&els[1][1]));
+        let z = ark_bn254::Fq2::new(fq_from_str(&els[2][0]), fq_from_str(&els[2][1]));
+        ark_bn254::G2Affine::from(ark_bn254::G2Projective::new(x, y, z))
     }
 
     #[tokio::test]
@@ -914,5 +1164,31 @@ mod tests {
         let verified = Groth16::<Bn254>::verify_with_processed_vk(&pvk, inputs, &proof).unwrap();
 
         assert!(verified);
+    }
+
+    #[test]
+    fn test_zkey_parse_bn() {
+        let zkey_path = "./test-vectors/circom2_multiplier2.zkey".to_string();
+
+        let mut zkey_reader = ZkeyHeaderReader::new(&zkey_path);
+        zkey_reader.read();
+
+        assert_eq!(zkey_reader.n8q, 32);
+        assert_eq!(zkey_reader.n8r, 32);
+        assert_eq!(zkey_reader.q, BigUint::from(ark_bn254::Fq::MODULUS));
+        assert_eq!(zkey_reader.r, BigUint::from(ark_bn254::Fr::MODULUS));
+    }
+
+    #[test]
+    fn test_zkey_parse_bls() {
+        let zkey_path = "./test-vectors/multiplier2_bls.zkey".to_string();
+
+        let mut zkey_reader = ZkeyHeaderReader::new(&zkey_path);
+        zkey_reader.read();
+
+        assert_eq!(zkey_reader.n8q, 48);
+        assert_eq!(zkey_reader.n8r, 32);
+        assert_eq!(zkey_reader.q, BigUint::from(ark_bls12_381::Fq::MODULUS));
+        assert_eq!(zkey_reader.r, BigUint::from(ark_bls12_381::Fr::MODULUS));
     }
 }

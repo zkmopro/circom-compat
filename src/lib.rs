@@ -11,4 +11,4 @@ pub use circom::{CircomBuilder, CircomCircuit, CircomConfig, CircomReduction};
 pub mod ethereum;
 
 mod zkey;
-pub use zkey::read_zkey;
+pub use zkey::{read_zkey, ZkeyHeaderReader, FieldSerialization};
