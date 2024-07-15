@@ -195,6 +195,14 @@ pub fn read_zkey<R: Read + Seek, P: Pairing + FieldSerialization>(
     Ok((proving_key, matrices))
 }
 
+/// Reads a SnarkJS ZKey file into an Arkworks ProvingKey.
+pub fn read_proving_key<R: Read + Seek, P: Pairing + FieldSerialization>(
+    reader: &mut R,
+) -> IoResult<ProvingKey<P>> {
+    let mut binfile = BinFile::<R, P>::new(reader)?;
+    binfile.proving_key()
+}
+
 #[derive(Debug)]
 struct BinFile<'a, R, P: Pairing + FieldSerialization> {
     #[allow(dead_code)]
